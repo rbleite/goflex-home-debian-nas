@@ -328,7 +328,15 @@ echo 'UUID=<DISK_UUID> /srv/data ntfs3 defaults,nofail,noatime,uid=1000,gid=1000
 mount -a && df -h /srv/data
 ```
 
-`ntfsfix` only clears the "dirty" flag and does basic repairs. Run a full `chkdsk` on Windows when you get the chance.
+> 🛑 **Run `chkdsk` before mounting read-write.** If `dmesg` shows `ntfs3: sdX1: It is recommened to use chkdsk` when you mount, the NTFS has structural damage. **`ntfsfix` does not repair it**: it only clears the "dirty" flag. On this install, skipping `chkdsk` led to a **kernel oops in `ntfs3`** (`run_get_max_vcn` ← `attr_set_size` ← `indx_delete_entry`) the first time a folder with a damaged index was deleted. The `rm` died with `Segmentation fault`, Samba hung, and Finder showed empty or endlessly loading folders.
+>
+> Safe order:
+> 1. Mount **read-only** first (`ro` instead of `defaults` in `fstab`) and check `dmesg`.
+> 2. If `ntfs3` recommends `chkdsk`: power off, move the drive to a Windows PC (USB-SATA adapter) and run `chkdsk X: /f`. A 1.5 TB drive takes 1–2 hours.
+> 3. Look in `found.000` for anything `chkdsk` detached, then mount read-write.
+> 4. If `ntfs3` still oopses on a volume, fall back to `ntfs-3g`: it is slower, but more tolerant of damaged NTFS.
+>
+> After `chkdsk`, the warning disappeared and deletes worked normally on the same kernel. Note that `chkdsk` may remove folders whose index it cannot repair, so copy anything irreplaceable off the drive before running it.
 
 ### Option B — Empty drive (ext4)
 
@@ -441,7 +449,8 @@ On each client, install the Tailscale app, join the same tailnet and connect to 
 | Commands ran in the wrong directory | `cd` failed, the rest ran anyway | Chain with `&&` |
 | `tar: No space left on device` | `/tmp` is a small tmpfs | Work under `/root` |
 | `systemctl: command not found` | The rootfs uses sysvinit | `service …`; `/etc/rc.local` |
-| NTFS mounts read-only | Volume is "dirty" | `ntfsfix -d /dev/sdX1` |
+| NTFS mounts read-only | Volume is "dirty" | `ntfsfix -d /dev/sdX1`, then `chkdsk` if `ntfs3` recommends it |
+| `rm` → `Segmentation fault`, kernel oops in `ntfs3`, Samba/Finder hang | Damaged NTFS index; `chkdsk` was skipped | Reboot, mount `ro`, run `chkdsk /f` on Windows; fall back to `ntfs-3g` if it recurs |
 | Finder can't copy | Root-owned folders / `veto files = ._*` | `chown`; don't veto `._*` |
 | Date back to 1970 after reboot | No RTC | `fake-hwclock` + NTP |
 | `locale` warnings | Client sends `LC_CTYPE=UTF-8` | `export LC_ALL=C.UTF-8` |
@@ -455,7 +464,16 @@ On each client, install the Tailscale app, join the same tailnet and connect to 
 - Run `apt-get update && apt-get upgrade` regularly. Before rebooting, check the timestamp of `/boot/uInitrd`.
 - Always shut down with `poweroff`. Pulling the plug can leave NTFS "dirty".
 - The static Tailscale binary **does not update itself**: repeat the download to upgrade.
-- Newer bodhi kernels (7.x series) install with `dpkg` and `mkimage`, as described in [[4]](#ref-4).
+- Newer bodhi kernels (7.x series) install with `dpkg` and `mkimage`, as described in [[4]](#ref-4). This guide's box runs 7.2.11. Back up `uImage` and `uInitrd` first; the `post-update.d` hook rebuilds `uInitrd`, and `uImage` is created by hand:
+  ```bash
+  cd /boot && cp -a uImage uImage.old && cp -a uInitrd uInitrd.old
+  tar xjf linux-7.2.11-kirkwood-tld-1-bodhi.tar.bz2 && tar xf linux-dtb-7.2.11-kirkwood-tld-1.tar
+  dpkg -i linux-image-7.2.11-kirkwood-tld-1_1_armel.deb
+  mkimage -A arm -O linux -T kernel -C none -a 0x00008000 -e 0x00008000 \
+          -n Linux-7.2.11-kirkwood-tld-1 -d vmlinuz-7.2.11-kirkwood-tld-1 uImage
+  ```
+- Watch the USB stick: `dmesg | grep -i "I/O error"`. Cheap sticks fail, so keep an image of it (`dd` to another machine) so a dead stick only costs a few minutes.
+- Check the data drive with `smartctl -H -A /dev/sda` (package `smartmontools`) and run `smartctl -t long` now and then.
 
 ## Recovery
 
